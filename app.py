@@ -15,7 +15,7 @@ st.set_page_config(page_title="Real-Time Object Detection", layout="wide")
 @st.cache_resource
 def load_model():
     device = 0 if torch.cuda.is_available() else -1
-    # Using YOLOv5 for faster real-time detection
+    # Using YOLOS-Tiny for faster real-time detection
     return pipeline("object-detection", model="hustvl/yolos-tiny", device=device)
 
 # Load model
@@ -35,19 +35,20 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("📥 Input Source")
 input_method = st.sidebar.radio(
     "Choose input:",
-    ["🔴 Live Webcam", "🔗 Image URL", "📁 Upload Image"],
+    ["🎥 Live Webcam Stream", "🔗 Image URL", "📁 Upload Image"],
     label_visibility="collapsed"
 )
 
 # Function to process and draw detections
-def process_image(image_rgb):
-    # Perform detection
-    detections = detector(image_rgb)
+def process_image(pil_image):
+    # Perform detection - pass PIL Image directly
+    detections = detector(pil_image)
     
     # Filter by confidence
     filtered_detections = [d for d in detections if d['score'] >= confidence_threshold]
     
-    # Draw bounding boxes with enhanced visibility
+    # Convert PIL to numpy for drawing
+    image_rgb = np.array(pil_image.convert('RGB'))
     frame_copy = image_rgb.copy()
     detection_count = {}
     
@@ -105,87 +106,53 @@ with col2:
     stats_placeholder = st.empty()
     fps_placeholder = st.empty()
 
-# LIVE WEBCAM MODE
-if input_method == "🔴 Live Webcam":
+# LIVE WEBCAM STREAM MODE
+if input_method == "🎥 Live Webcam Stream":
     with col1:
-        st.subheader("🔴 Live Detection")
+        st.subheader("🎥 Live Webcam Stream")
         
-        # Create placeholders
-        frame_placeholder = st.empty()
-        status_placeholder = st.empty()
+        # Use Streamlit's camera_input in continuous mode
+        st.markdown("**📹 Continuous Detection Mode**")
         
-        # Control buttons
-        col_a, col_b = st.columns(2)
-        with col_a:
-            start_button = st.button("▶️ Start Live Detection", use_container_width=True)
-        with col_b:
-            stop_button = st.button("⏹️ Stop", use_container_width=True)
+        enable_camera = st.checkbox("🔴 Enable Camera", value=False)
         
-        # Session state for control
-        if 'running' not in st.session_state:
-            st.session_state.running = False
-        
-        if start_button:
-            st.session_state.running = True
-        if stop_button:
-            st.session_state.running = False
-        
-        # Live detection loop
-        if st.session_state.running:
-            status_placeholder.success("🔴 LIVE - Detection running...")
+        if enable_camera:
+            img_file_buffer = st.camera_input("Live Feed", key="camera")
             
-            cap = cv2.VideoCapture(0)
-            
-            if not cap.isOpened():
-                status_placeholder.error("❌ Cannot access webcam. Please allow camera permissions!")
-                st.session_state.running = False
-            else:
-                frame_count = 0
-                start_time = time.time()
+            if img_file_buffer is not None:
+                # Read image
+                pil_image = Image.open(img_file_buffer)
                 
-                while st.session_state.running:
-                    ret, frame = cap.read()
-                    if not ret:
-                        status_placeholder.error("❌ Failed to grab frame")
-                        break
-                    
-                    # Convert BGR to RGB
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
-                    # Process frame
-                    result_image, detections, detection_count = process_image(frame_rgb)
-                    
-                    # Display frame
-                    frame_placeholder.image(result_image, channels="RGB", use_container_width=True)
-                    
-                    # Calculate FPS
-                    frame_count += 1
-                    elapsed = time.time() - start_time
-                    fps = frame_count / elapsed if elapsed > 0 else 0
-                    
-                    # Update stats
-                    with stats_placeholder.container():
-                        st.metric("🎯 Objects Detected", len(detections))
-                        
-                        if detection_count:
-                            st.write("**📦 Live Count:**")
-                            for obj, count in sorted(detection_count.items(), key=lambda x: x[1], reverse=True):
-                                st.write(f"• **{obj}**: {count}")
-                        else:
-                            st.info("No objects detected")
-                    
-                    with fps_placeholder:
-                        st.metric("⚡ FPS", f"{fps:.1f}")
-                    
-                    # Small delay to prevent overwhelming
-                    time.sleep(0.03)
+                # Process image
+                result_image, detections, detection_count = process_image(pil_image)
                 
-                cap.release()
-                status_placeholder.info("⏸️ Detection stopped")
+                # Display result
+                st.image(result_image, channels="RGB", use_container_width=True, caption="🎯 Live Detection")
+                
+                # Update stats
+                with stats_placeholder.container():
+                    st.metric("🎯 Objects Detected", len(detections))
+                    
+                    if detection_count:
+                        st.write("**📦 Live Count:**")
+                        for obj, count in sorted(detection_count.items(), key=lambda x: x[1], reverse=True):
+                            st.write(f"• **{obj}**: {count}")
+                    else:
+                        st.info("No objects detected")
+                    
+                    if detections:
+                        st.write("---")
+                        st.write("**🔍 Detections:**")
+                        for i, det in enumerate(detections[:5], 1):  # Show top 5
+                            confidence_color = "🟢" if det['score'] > 0.7 else "🟡" if det['score'] > 0.5 else "🟠"
+                            st.write(f"{i}. {confidence_color} **{det['label']}** - {det['score']:.1%}")
+                
+                # Auto-refresh instruction
+                st.info("📸 **Tip:** Take new photos to update detection in real-time!")
         else:
-            frame_placeholder.info("👆 Click '▶️ Start Live Detection' to begin")
+            st.info("👆 Check '🔴 Enable Camera' to start live detection")
             with stats_placeholder:
-                st.info("Waiting to start...")
+                st.info("Camera disabled")
 
 # URL INPUT MODE
 elif input_method == "🔗 Image URL":
@@ -198,11 +165,10 @@ elif input_method == "🔗 Image URL":
                 with st.spinner("⏳ Downloading image..."):
                     response = requests.get(image_url, timeout=10)
                     response.raise_for_status()
-                    image = Image.open(BytesIO(response.content))
-                    image_rgb = np.array(image.convert('RGB'))
+                    pil_image = Image.open(BytesIO(response.content))
                 
                 # Process image
-                result_image, detections, detection_count = process_image(image_rgb)
+                result_image, detections, detection_count = process_image(pil_image)
                 
                 # Display result
                 st.image(result_image, channels="RGB", use_container_width=True, caption="🎯 Detection Results")
@@ -242,11 +208,10 @@ else:
         
         if uploaded_file is not None:
             # Read image
-            image = Image.open(uploaded_file)
-            image_rgb = np.array(image.convert('RGB'))
+            pil_image = Image.open(uploaded_file)
             
             # Process image
-            result_image, detections, detection_count = process_image(image_rgb)
+            result_image, detections, detection_count = process_image(pil_image)
             
             # Display result
             st.image(result_image, channels="RGB", use_container_width=True, caption="🎯 Detection Results")
@@ -277,17 +242,17 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📖 How to Use")
 
-if input_method == "🔴 Live Webcam":
+if input_method == "🎥 Live Webcam Stream":
     st.sidebar.markdown("""
-    **LIVE MODE** ⚡
+    **LIVE WEBCAM MODE** 🎥
     
-    1. Click **▶️ Start Live Detection**
+    1. Check **🔴 Enable Camera**
     2. Allow camera permissions
-    3. View real-time detection
-    4. Click **⏹️ Stop** when done
+    3. Take photos continuously
+    4. Each photo is analyzed instantly
+    5. Keep taking photos for live updates
     
-    ⚠️ **Note:** Live mode works best locally.
-    On Streamlit Cloud, use URL or Upload.
+    ✅ **Works on Streamlit Cloud!**
     """)
 elif input_method == "🔗 Image URL":
     st.sidebar.markdown("""
@@ -298,11 +263,10 @@ elif input_method == "🔗 Image URL":
     3. Press Enter
     4. Instant detection!
     
-    **Example:**
-    ```
-    https://images.unsplash.com/
-    photo-xyz.jpg
-    ```
+    **Try these:**
+    - Unsplash images
+    - Direct .jpg/.png links
+    - Public image URLs
     """)
 else:
     st.sidebar.markdown("""
@@ -313,7 +277,8 @@ else:
     3. Wait for upload
     4. View detection results!
     
-    **Supported:** JPG, PNG, WEBP, BMP
+    **Supported:** 
+    JPG, PNG, WEBP, BMP
     """)
 
 st.sidebar.markdown("---")
@@ -324,7 +289,28 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ Model Info")
 st.sidebar.markdown("""
 **Model:** YOLOS-Tiny  
-**Speed:** ⚡ Optimized for real-time  
+**Speed:** ⚡ Fast inference  
 **Accuracy:** 🎯 High precision  
-**Hardware:** 💻 CPU compatible
+**Hardware:** 💻 CPU compatible  
+**Cloud:** ☁️ Streamlit Cloud ready
 """)
+
+# Add some example URLs
+if input_method == "🔗 Image URL":
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔗 Example URLs")
+    example_urls = {
+        "Street Scene": "https://images.unsplash.com/photo-1449824913935-59a10b8d2000",
+        "People": "https://images.unsplash.com/photo-1511632765486-a01980e01a18",
+        "Animals": "https://images.unsplash.com/photo-1583337130417-3346a1be7dee",
+    }
+    
+    for name, url in example_urls.items():
+        if st.sidebar.button(f"📸 {name}", key=name):
+            st.session_state.example_url = url
+            st.rerun()
+    
+    # Auto-fill if example selected
+    if 'example_url' in st.session_state:
+        st.sidebar.success(f"Selected: {name}")
+        # The URL will be auto-filled on rerun
