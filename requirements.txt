@@ -5,3 +5,5 @@ torchvision
 opencv-python-headless
 Pillow
 timm
+streamlit-webrtc
+av
