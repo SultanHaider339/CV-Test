@@ -6,6 +6,8 @@ import torch
 import cv2
 import requests
 from io import BytesIO
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
 
 # Page config
 st.set_page_config(page_title="Real-Time Object Detection", layout="wide")
@@ -33,9 +35,72 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("📥 Input Source")
 input_method = st.sidebar.radio(
     "Choose input:",
-    ["🎥 Live Webcam", "🔗 Image URL", "📁 Upload Image"],
+    ["🔴 Live Video Stream", "🎥 Webcam Photo", "🔗 Image URL", "📁 Upload Image"],
     label_visibility="collapsed"
 )
+
+# Video processor for real-time detection
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.confidence = 0.3
+        
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        
+        # Convert BGR to RGB
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # Convert to PIL Image
+        pil_image = Image.fromarray(img_rgb)
+        
+        # Perform detection
+        detections = detector(pil_image)
+        
+        # Filter by confidence
+        filtered_detections = [d for d in detections if d['score'] >= self.confidence]
+        
+        # Draw bounding boxes
+        for detection in filtered_detections:
+            box = detection['box']
+            label = detection['label']
+            score = detection['score']
+            
+            xmin = int(box['xmin'])
+            ymin = int(box['ymin'])
+            xmax = int(box['xmax'])
+            ymax = int(box['ymax'])
+            
+            # Draw rectangle
+            cv2.rectangle(img, (xmin, ymin), (xmax, ymax), (0, 255, 0), 4)
+            
+            # Prepare text
+            text = f"{label}: {score:.0%}"
+            font = cv2.FONT_HERSHEY_DUPLEX
+            font_scale = 0.9
+            font_thickness = 2
+            
+            # Get text size
+            (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
+            
+            # Draw text background
+            padding = 10
+            cv2.rectangle(img, 
+                         (xmin - 2, ymin - text_height - padding - baseline),
+                         (xmin + text_width + padding, ymin),
+                         (0, 0, 0), -1)
+            
+            # Draw border
+            cv2.rectangle(img,
+                         (xmin - 2, ymin - text_height - padding - baseline),
+                         (xmin + text_width + padding, ymin),
+                         (0, 255, 0), 3)
+            
+            # Draw text
+            cv2.putText(img, text, 
+                       (xmin + 4, ymin - padding + 2), 
+                       font, font_scale, (255, 255, 255), font_thickness, cv2.LINE_AA)
+        
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # Function to process and draw detections
 def process_image(pil_image):
@@ -103,30 +168,67 @@ with col2:
     st.subheader("📊 Detection Stats")
     stats_placeholder = st.empty()
 
-# LIVE WEBCAM MODE - Auto-updating
-if input_method == "🎥 Live Webcam":
+# LIVE VIDEO STREAM MODE - Real-time continuous detection
+if input_method == "🔴 Live Video Stream":
     with col1:
-        st.subheader("🎥 Live Webcam Detection")
+        st.subheader("🔴 Live Video Stream Detection")
+        st.markdown("**Real-time object detection on live video feed**")
+        
+        # WebRTC configuration
+        rtc_configuration = RTCConfiguration(
+            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        )
+        
+        # Create video processor instance
+        video_processor = VideoProcessor()
+        video_processor.confidence = confidence_threshold
+        
+        # WebRTC streamer
+        webrtc_ctx = webrtc_streamer(
+            key="object-detection",
+            video_processor_factory=VideoProcessor,
+            rtc_configuration=rtc_configuration,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
+        )
+        
+        st.info("🔴 **LIVE MODE:** Objects are detected in real-time as you move them in front of the camera!")
+        st.markdown("""
+        **How it works:**
+        - Video streams continuously from your camera
+        - Each frame is analyzed instantly
+        - Bounding boxes appear on detected objects
+        - No saving, no delays - pure real-time detection!
+        """)
+        
+        with stats_placeholder:
+            st.success("✅ Live video stream active - detection running on every frame!")
+            st.info("💡 Move objects in front of camera to see instant detection")
+
+# WEBCAM PHOTO MODE
+elif input_method == "🎥 Webcam Photo":
+    with col1:
+        st.subheader("🎥 Webcam Photo Detection")
         
         # Webcam widget that auto-updates
-        img_file_buffer = st.camera_input("Live Feed")
+        img_file_buffer = st.camera_input("Take a photo")
         
         if img_file_buffer is not None:
-            # Read and process image directly without downloading
+            # Read and process image directly
             pil_image = Image.open(img_file_buffer)
             
             # Process image
             result_image, detections, detection_count = process_image(pil_image)
             
             # Display result
-            st.image(result_image, channels="RGB", use_container_width=True, caption="🎯 Live Detection")
+            st.image(result_image, channels="RGB", use_container_width=True, caption="🎯 Detection Results")
             
             # Update stats
             with stats_placeholder.container():
                 st.metric("🎯 Objects Detected", len(detections))
                 
                 if detection_count:
-                    st.write("**📦 Live Count:**")
+                    st.write("**📦 Object Count:**")
                     for obj, count in sorted(detection_count.items(), key=lambda x: x[1], reverse=True):
                         st.write(f"• **{obj}**: {count}")
                 else:
@@ -139,19 +241,17 @@ if input_method == "🎥 Live Webcam":
                         confidence_color = "🟢" if det['score'] > 0.7 else "🟡" if det['score'] > 0.5 else "🟠"
                         st.write(f"{i}. {confidence_color} **{det['label']}** - {det['score']:.1%}")
             
-            # Add auto-refresh button
-            st.info("📸 **Live Mode Active:** Take new photos to update detection continuously!")
+            st.info("📸 Take new photos to update detection!")
         else:
-            st.info("👆 Click 'Take a photo' to start live detection")
+            st.info("👆 Click 'Take a photo' to start detection")
             with stats_placeholder:
                 st.info("Waiting for camera input...")
 
-# URL INPUT MODE - Direct processing without download
+# URL INPUT MODE
 elif input_method == "🔗 Image URL":
     with col1:
         st.subheader("🔗 Detect from Image URL")
         
-        # URL input with session state
         if 'url_input' not in st.session_state:
             st.session_state.url_input = ''
         
@@ -164,21 +264,15 @@ elif input_method == "🔗 Image URL":
         
         if image_url:
             try:
-                # Stream image directly without downloading to disk
                 with st.spinner("⏳ Loading image..."):
                     response = requests.get(image_url, timeout=10, stream=True)
                     response.raise_for_status()
-                    
-                    # Process directly from stream
                     pil_image = Image.open(BytesIO(response.content))
                 
-                # Process image in memory
                 result_image, detections, detection_count = process_image(pil_image)
                 
-                # Display result
                 st.image(result_image, channels="RGB", use_container_width=True, caption="🎯 Detection Results")
                 
-                # Display stats
                 with stats_placeholder.container():
                     st.metric("🎯 Total Objects", len(detections))
                     
@@ -196,34 +290,27 @@ elif input_method == "🔗 Image URL":
                             confidence_color = "🟢" if det['score'] > 0.7 else "🟡" if det['score'] > 0.5 else "🟠"
                             st.write(f"{i}. {confidence_color} **{det['label']}** - {det['score']:.1%}")
                 
-                st.success("✅ Image processed directly from URL - no download required!")
+                st.success("✅ Image processed directly from URL!")
                 
-            except requests.exceptions.RequestException as e:
-                st.error(f"❌ Error loading image from URL: {str(e)}")
             except Exception as e:
-                st.error(f"❌ Error processing image: {str(e)}")
+                st.error(f"❌ Error: {str(e)}")
         else:
-            st.info("👆 Enter an image URL above to detect objects instantly")
+            st.info("👆 Enter an image URL to detect objects")
             with stats_placeholder:
                 st.info("Waiting for URL...")
 
-# FILE UPLOAD MODE - Direct processing from memory
+# FILE UPLOAD MODE
 else:
     with col1:
         st.subheader("📁 Upload and Detect")
         uploaded_file = st.file_uploader("Choose an image...", type=['jpg', 'jpeg', 'png', 'webp', 'bmp'])
         
         if uploaded_file is not None:
-            # Process directly from upload buffer without saving
             pil_image = Image.open(uploaded_file)
-            
-            # Process image in memory
             result_image, detections, detection_count = process_image(pil_image)
             
-            # Display result
             st.image(result_image, channels="RGB", use_container_width=True, caption="🎯 Detection Results")
             
-            # Display stats
             with stats_placeholder.container():
                 st.metric("🎯 Total Objects", len(detections))
                 
@@ -241,9 +328,9 @@ else:
                         confidence_color = "🟢" if det['score'] > 0.7 else "🟡" if det['score'] > 0.5 else "🟠"
                         st.write(f"{i}. {confidence_color} **{det['label']}** - {det['score']:.1%}")
             
-            st.success("✅ Image processed directly from upload - no file saved!")
+            st.success("✅ Image processed!")
         else:
-            st.info("👆 Upload an image to detect objects instantly")
+            st.info("👆 Upload an image to detect objects")
             with stats_placeholder:
                 st.info("Waiting for upload...")
 
@@ -251,18 +338,33 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📖 How to Use")
 
-if input_method == "🎥 Live Webcam":
+if input_method == "🔴 Live Video Stream":
     st.sidebar.markdown("""
-    **LIVE WEBCAM MODE** 🎥
+    **LIVE VIDEO STREAM** 🔴
     
-    ✨ **Real-time detection:**
-    1. Click **'Take a photo'**
+    🎯 **TRUE Real-time detection:**
+    1. Click **START** button
     2. Allow camera permissions
-    3. Image is analyzed instantly
-    4. Keep taking photos for continuous updates
+    3. Video streams continuously
+    4. Objects detected on every frame
+    5. Move objects - see instant detection!
     
-    🚀 **No downloads required!**
-    Everything happens in browser memory
+    ⚡ **No saving, no delays**
+    Pure real-time processing
+    
+    ⚠️ **Note:** Works best locally
+    For Streamlit Cloud, use Photo mode
+    """)
+elif input_method == "🎥 Webcam Photo":
+    st.sidebar.markdown("""
+    **WEBCAM PHOTO MODE** 🎥
+    
+    📸 **Quick detection:**
+    1. Click 'Take a photo'
+    2. Allow camera access
+    3. Capture image
+    4. Instant analysis
+    5. Repeat for updates
     
     ✅ Works on Streamlit Cloud
     """)
@@ -270,37 +372,27 @@ elif input_method == "🔗 Image URL":
     st.sidebar.markdown("""
     **URL MODE** 🔗
     
-    ✨ **Instant detection:**
-    1. Paste any image URL
+    1. Paste image URL
     2. Press Enter
-    3. Image streams directly to AI
-    4. Results appear instantly
+    3. Instant detection
     
-    🚀 **No downloads to disk!**
-    Image processed in memory only
-    
-    **Try example URLs below** ⬇️
+    **Try examples below** ⬇️
     """)
 else:
     st.sidebar.markdown("""
     **UPLOAD MODE** 📁
     
-    ✨ **Quick detection:**
-    1. Click **'Browse files'**
-    2. Select image from device
-    3. Processing starts immediately
-    4. View instant results
+    1. Browse files
+    2. Select image
+    3. View results
     
-    🚀 **No file saving!**
-    Upload processed in memory
-    
-    **Supported:** JPG, PNG, WEBP, BMP
+    Supported: JPG, PNG, WEBP, BMP
     """)
 
 st.sidebar.markdown("---")
-st.sidebar.info("💡 Adjust confidence threshold to filter detections")
+st.sidebar.info("💡 Adjust confidence threshold for filtering")
 
-# Example URLs for quick testing
+# Example URLs
 if input_method == "🔗 Image URL":
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🔗 Quick Test URLs")
@@ -322,11 +414,8 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ Model Info")
 st.sidebar.markdown("""
 **Model:** YOLOS-Tiny  
-**Processing:** 🚀 Real-time in-memory  
+**Mode:** 🔴 Real-time streaming  
+**Processing:** ⚡ Frame-by-frame  
 **Storage:** 💾 Zero disk usage  
-**Speed:** ⚡ Instant detection  
-**Cloud:** ☁️ Fully cloud-compatible
+**Speed:** 🚀 Instant detection
 """)
-
-st.sidebar.markdown("---")
-st.sidebar.success("🎯 All processing happens in memory - no downloads!")
